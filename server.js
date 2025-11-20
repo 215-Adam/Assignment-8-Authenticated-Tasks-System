@@ -1,11 +1,23 @@
 const express = require('express');
-const { db, Project, Task } = require('./database/setup');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const { db, Project, Task, User } = require('./database/setup');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
+
+app.use(session({
+    secret: process.env.SESSION_SECRET || "defaultsecret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: false,
+        maxAge: 24 * 60 * 60 * 1000
+    }
+}));
 
 // Test database connection
 async function testConnection() {
@@ -19,10 +31,93 @@ async function testConnection() {
 
 testConnection();
 
+// Authentication Middleware
+function isAuthenticated(req, res, next) {
+    if (req.session.userId) {
+        req.user = { id: req.session.userId, email: req.session.userEmail };
+        next();
+    } else {
+        res.status(401).json({ error: 'You must be logged in to access this resource' });
+    }
+}
+// POST /api/register - User registration
+app.post('/api/register', async (req, res) => {
+    const { username, email, password } = req.body;
+
+    if (!username || !email || !password) {
+        return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    try {
+        // Check if email already exists
+        const existingUser = await User.findOne({ where: { email } });
+        if (existingUser) {
+            return res.status(400).json({ error: 'Email already in use' });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // Create user
+        const newUser = await User.create({
+            username,
+            email,
+            password: hashedPassword
+        });
+
+        res.status(201).json({ message: 'User registered successfully', userId: newUser.id });
+    } catch (err) {
+        console.error('Registration error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// USER ROUTES
+
+// POST /api/login - User login
+app.post('/api/login', async (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    try {
+        const user = await User.findOne({ where: { email } });
+        if (!user) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        const passwordMatch = await bcrypt.compare(password, user.password);
+        if (!passwordMatch) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Set session
+        req.session.userId = user.id;
+        req.session.userEmail = user.email;
+
+        res.json({ message: 'Login successful', user: { id: user.id, email: user.email } });
+    } catch (err) {
+        console.error('Login error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// POST /api/logout - User logout
+app.post('/api/logout', (req, res) => {
+    req.session.destroy(err => {
+        if (err) {
+            return res.status(500).json({ error: 'Logout failed' });
+        }
+        res.json({ message: 'Logout successful' });
+    });
+});
+
 // PROJECT ROUTES
 
-// GET /api/projects - Get all projects
-app.get('/api/projects', async (req, res) => {
+// GET /api/projects - Get all projects (protected)
+app.get('/api/projects', isAuthenticated, async (req, res) => {
     try {
         const projects = await Project.findAll();
         res.json(projects);
@@ -36,11 +131,9 @@ app.get('/api/projects', async (req, res) => {
 app.get('/api/projects/:id', async (req, res) => {
     try {
         const project = await Project.findByPk(req.params.id);
-        
         if (!project) {
             return res.status(404).json({ error: 'Project not found' });
         }
-        
         res.json(project);
     } catch (error) {
         console.error('Error fetching project:', error);
@@ -52,14 +145,7 @@ app.get('/api/projects/:id', async (req, res) => {
 app.post('/api/projects', async (req, res) => {
     try {
         const { name, description, status, dueDate } = req.body;
-        
-        const newProject = await Project.create({
-            name,
-            description,
-            status,
-            dueDate
-        });
-        
+        const newProject = await Project.create({ name, description, status, dueDate });
         res.status(201).json(newProject);
     } catch (error) {
         console.error('Error creating project:', error);
@@ -71,16 +157,13 @@ app.post('/api/projects', async (req, res) => {
 app.put('/api/projects/:id', async (req, res) => {
     try {
         const { name, description, status, dueDate } = req.body;
-        
         const [updatedRowsCount] = await Project.update(
             { name, description, status, dueDate },
             { where: { id: req.params.id } }
         );
-        
         if (updatedRowsCount === 0) {
             return res.status(404).json({ error: 'Project not found' });
         }
-        
         const updatedProject = await Project.findByPk(req.params.id);
         res.json(updatedProject);
     } catch (error) {
@@ -92,14 +175,10 @@ app.put('/api/projects/:id', async (req, res) => {
 // DELETE /api/projects/:id - Delete project
 app.delete('/api/projects/:id', async (req, res) => {
     try {
-        const deletedRowsCount = await Project.destroy({
-            where: { id: req.params.id }
-        });
-        
+        const deletedRowsCount = await Project.destroy({ where: { id: req.params.id } });
         if (deletedRowsCount === 0) {
             return res.status(404).json({ error: 'Project not found' });
         }
-        
         res.json({ message: 'Project deleted successfully' });
     } catch (error) {
         console.error('Error deleting project:', error);
@@ -124,11 +203,9 @@ app.get('/api/tasks', async (req, res) => {
 app.get('/api/tasks/:id', async (req, res) => {
     try {
         const task = await Task.findByPk(req.params.id);
-        
         if (!task) {
             return res.status(404).json({ error: 'Task not found' });
         }
-        
         res.json(task);
     } catch (error) {
         console.error('Error fetching task:', error);
@@ -140,16 +217,7 @@ app.get('/api/tasks/:id', async (req, res) => {
 app.post('/api/tasks', async (req, res) => {
     try {
         const { title, description, completed, priority, dueDate, projectId } = req.body;
-        
-        const newTask = await Task.create({
-            title,
-            description,
-            completed,
-            priority,
-            dueDate,
-            projectId
-        });
-        
+        const newTask = await Task.create({ title, description, completed, priority, dueDate, projectId });
         res.status(201).json(newTask);
     } catch (error) {
         console.error('Error creating task:', error);
@@ -161,16 +229,13 @@ app.post('/api/tasks', async (req, res) => {
 app.put('/api/tasks/:id', async (req, res) => {
     try {
         const { title, description, completed, priority, dueDate, projectId } = req.body;
-        
         const [updatedRowsCount] = await Task.update(
             { title, description, completed, priority, dueDate, projectId },
             { where: { id: req.params.id } }
         );
-        
         if (updatedRowsCount === 0) {
             return res.status(404).json({ error: 'Task not found' });
         }
-        
         const updatedTask = await Task.findByPk(req.params.id);
         res.json(updatedTask);
     } catch (error) {
@@ -182,14 +247,10 @@ app.put('/api/tasks/:id', async (req, res) => {
 // DELETE /api/tasks/:id - Delete task
 app.delete('/api/tasks/:id', async (req, res) => {
     try {
-        const deletedRowsCount = await Task.destroy({
-        where: { id: req.params.id }
-        });
-        
+        const deletedRowsCount = await Task.destroy({ where: { id: req.params.id } });
         if (deletedRowsCount === 0) {
             return res.status(404).json({ error: 'Task not found' });
         }
-        
         res.json({ message: 'Task deleted successfully' });
     } catch (error) {
         console.error('Error deleting task:', error);
